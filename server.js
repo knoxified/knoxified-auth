@@ -51,6 +51,14 @@ app.get('/auth/:provider/start', async (req, res) => {
       return res.status(400).json({ error: 'Missing user_id' });
     }
 
+    // Where to send the user back to on the dashboard once this finishes.
+    // Only allow a relative path (must start with /) so this can't be used
+    // to redirect somewhere off-site.
+    const returnPath =
+      typeof req.query.return_to === 'string' && req.query.return_to.startsWith('/')
+        ? req.query.return_to
+        : '/integrations';
+
     const state = `${provider}-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
 
     await axios.delete(
@@ -65,6 +73,7 @@ app.get('/auth/:provider/start', async (req, res) => {
         provider,
         state,
         used: false,
+        return_path: returnPath,
         expires_at: new Date(Date.now() + 10 * 60 * 1000).toISOString()
       },
       { headers: sbHeaders() }
@@ -175,6 +184,11 @@ async function getValidGoogleToken(userId) {
  * CALLBACK (UNCHANGED + DEBUG LOG ADDED)
  */
 app.get('/auth/:provider/callback', async (req, res) => {
+  const DASHBOARD_BASE_URL = 'https://dashboard.knoxified.org';
+  // Default used only if we fail before we can look up the session (so we
+  // still have somewhere safe to send the user back to).
+  let returnPath = '/integrations';
+
   try {
     const { provider } = req.params;
     const { code, state } = req.query;
@@ -192,11 +206,13 @@ app.get('/auth/:provider/callback', async (req, res) => {
     const session = sessionRes.data?.[0];
 
     if (!session) {
-      return res.redirect(`https://knoxified.org?status=invalid_state`);
+      return res.redirect(`${DASHBOARD_BASE_URL}${returnPath}?status=invalid_state`);
     }
 
+    returnPath = session.return_path || returnPath;
+
     if (session.used) {
-      return res.redirect(`https://knoxified.org?status=already_used`);
+      return res.redirect(`${DASHBOARD_BASE_URL}${returnPath}?status=already_used`);
     }
 
     const userId = session.user_id;
@@ -227,7 +243,7 @@ app.get('/auth/:provider/callback', async (req, res) => {
     const tokens = tokenResponse.data;
 
     if (!tokens.access_token) {
-      return res.redirect(`https://knoxified.org?status=token_missing`);
+      return res.redirect(`${DASHBOARD_BASE_URL}${returnPath}?status=token_missing`);
     }
 
     try {
@@ -245,7 +261,7 @@ app.get('/auth/:provider/callback', async (req, res) => {
       );
     } catch (dbErr) {
       console.log('SUPABASE SAVE ERROR:', dbErr.response?.data || dbErr.message);
-      return res.redirect(`https://knoxified.org?status=db_save_failed`);
+      return res.redirect(`${DASHBOARD_BASE_URL}${returnPath}?status=db_save_failed`);
     }
 
     await axios.patch(
@@ -255,14 +271,14 @@ app.get('/auth/:provider/callback', async (req, res) => {
     );
 
     return res.redirect(
-      `https://knoxified.org?provider=${provider}&status=connected`
+      `${DASHBOARD_BASE_URL}${returnPath}?provider=${provider}&status=connected`
     );
 
   } catch (err) {
     console.log('OAuth Error:', err.response?.data || err.message);
 
     return res.redirect(
-      `https://knoxified.org?status=failed&reason=${encodeURIComponent(err.message)}`
+      `${DASHBOARD_BASE_URL}${returnPath}?status=failed&reason=${encodeURIComponent(err.message)}`
     );
   }
 });
