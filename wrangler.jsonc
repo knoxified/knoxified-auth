@@ -1,0 +1,8 @@
+{
+  "name": "knoxified-auth",
+  "main": "src/index.js",
+  "compatibility_date": "2026-08-01",
+  "observability": {
+    "enabled": true
+  }
+}

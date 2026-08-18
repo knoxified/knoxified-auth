@@ -1,0 +1,30 @@
+# For LOCAL testing only: copy this file to .dev.vars and fill in real values.
+# `wrangler dev` reads .dev.vars automatically -- it is NOT committed to git.
+#
+# For PRODUCTION, these same values go in the Cloudflare dashboard instead:
+# Workers & Pages -> knoxified-auth -> Settings -> Variables and Secrets
+# (add each as a "Secret", not a plain text "Variable", since these are
+# credentials).
+
+SUPABASE_URL=https://elpljgrwrzaugsunoidf.supabase.co
+SUPABASE_SERVICE_ROLE_KEY=
+
+# Google is the only provider with real credentials configured so far.
+GOOGLE_CLIENT_ID=
+GOOGLE_CLIENT_SECRET=
+
+# Not yet configured -- add these when each provider actually gets set up.
+# Until then, clicking "Connect" for these on the dashboard will redirect
+# correctly but fail at the provider with a missing/undefined client ID.
+# MICROSOFT_CLIENT_ID=
+# MICROSOFT_CLIENT_SECRET=
+# NOTION_CLIENT_ID=
+# NOTION_CLIENT_SECRET=
+# SLACK_CLIENT_ID=
+# SLACK_CLIENT_SECRET=
+# GITHUB_CLIENT_ID=
+# GITHUB_CLIENT_SECRET=
+# LINKEDIN_CLIENT_ID=
+# LINKEDIN_CLIENT_SECRET=
+# META_CLIENT_ID=
+# META_CLIENT_SECRET=

@@ -64,4 +64,4 @@ const providers = {
   }
 };
 
-module.exports = providers;
+export default providers;
