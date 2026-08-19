@@ -130,7 +130,18 @@ async function refreshGoogleToken(env, refresh_token) {
 }
 
 /**
- * GET VALID GOOGLE TOKEN (best-effort lock -- see note on refreshLocks above)
+ * GET VALID GOOGLE TOKEN
+ *
+ * Two layers here:
+ * - refreshLocks (in-memory Map): a fast-path optimization only, avoids a
+ *   redundant DB round-trip when multiple requests land on the same
+ *   isolate. NOT relied on for correctness.
+ * - refresh_claimed_until (DB column, atomic conditional UPDATE): the real
+ *   cross-instance lock. Only one concurrent caller's PATCH can match the
+ *   WHERE clause, no matter how many separate servers/isolates/instances
+ *   are handling requests -- the database is the single source of truth.
+ *   This is what actually makes concurrent refreshes safe, regardless of
+ *   hosting platform.
  */
 async function getValidGoogleToken(env, userId) {
   if (refreshLocks.has(userId)) {
@@ -153,6 +164,41 @@ async function getValidGoogleToken(env, userId) {
         return connection.access_token;
       }
 
+      // Try to atomically claim the right to refresh this connection.
+      const claimUntil = new Date(Date.now() + 15000).toISOString();
+      const nowIso = new Date().toISOString();
+
+      const claimed = await fetchJson(
+        `${env.SUPABASE_URL}/rest/v1/oauth_connections?id=eq.${connection.id}` +
+          `&or=(refresh_claimed_until.is.null,refresh_claimed_until.lt.${encodeURIComponent(nowIso)})`,
+        {
+          method: 'PATCH',
+          headers: { ...sbHeaders(env), Prefer: 'return=representation' },
+          body: JSON.stringify({ refresh_claimed_until: claimUntil })
+        }
+      );
+
+      if (!claimed || claimed.length === 0) {
+        // Someone else already claimed this refresh (a different instance
+        // entirely, possibly). Their refresh should complete in well
+        // under a second in practice -- wait briefly and read whatever
+        // they wrote instead of racing them or refreshing twice.
+        console.log(`[CLAIM] Refresh already claimed for user ${userId}, waiting`);
+        await new Promise((resolve) => setTimeout(resolve, 1500));
+
+        const latestRows = await fetchJson(
+          `${env.SUPABASE_URL}/rest/v1/oauth_connections?id=eq.${connection.id}`,
+          { headers: sbHeaders(env) }
+        );
+        const latest = latestRows?.[0];
+        if (latest && new Date(latest.expires_at).getTime() > Date.now()) {
+          return latest.access_token;
+        }
+        // Still not refreshed (e.g. the other claimant failed partway
+        // through) -- fall through and refresh ourselves rather than
+        // give up.
+      }
+
       console.log(`[REFRESH] Refreshing token for user ${userId}`);
       const refreshed = await refreshGoogleToken(env, connection.refresh_token);
 
@@ -164,7 +210,8 @@ async function getValidGoogleToken(env, userId) {
         body: JSON.stringify({
           access_token: refreshed.access_token,
           expires_at: new Date(Date.now() + refreshed.expires_in * 1000).toISOString(),
-          refresh_token: refreshed.refresh_token || connection.refresh_token
+          refresh_token: refreshed.refresh_token || connection.refresh_token,
+          refresh_claimed_until: null
         })
       });
 
