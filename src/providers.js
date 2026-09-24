@@ -24,8 +24,25 @@ const providers = {
   microsoft: {
     authUrl: "https://login.microsoftonline.com/common/oauth2/v2.0/authorize",
     tokenUrl: "https://login.microsoftonline.com/common/oauth2/v2.0/token",
-    scopes: ["User.Read", "offline_access"],
+    // Mail.Send lets Knoxified send email sequences from the customer's own
+    // Outlook / Microsoft 365 mailbox. Existing connections made before this
+    // scope was added must reconnect once to grant it.
+    scopes: ["User.Read", "offline_access", "Mail.Send"],
     redirectUri: `${BASE_URL}/auth/microsoft/callback`
+  },
+
+  // Zoho Mail. Zoho runs separate data centers (.com, .eu, .in, .com.au ...)
+  // and tells us which one the customer's account lives in via the
+  // "accounts-server" query param on the callback; index.js stores that with
+  // the connection and uses it for every later token/refresh call.
+  zoho: {
+    authUrl: "https://accounts.zoho.com/oauth/v2/auth",
+    tokenUrl: "https://accounts.zoho.com/oauth/v2/token",
+    scopes: ["ZohoMail.messages.CREATE", "ZohoMail.accounts.READ"],
+    scopeSeparator: ",",
+    accessType: "offline",
+    prompt: "consent",
+    redirectUri: `${BASE_URL}/auth/zoho/callback`
   },
 
   notion: {
