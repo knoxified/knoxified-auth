@@ -2,6 +2,14 @@
   "name": "knoxified-auth",
   "main": "src/index.js",
   "compatibility_date": "2026-08-01",
+  // Non-secret config lives here so `wrangler deploy` can never wipe it.
+  // (Plain-text variables set only in the dashboard are DELETED on every
+  // deploy; keep_vars protects any others, e.g. GOOGLE_CLIENT_ID. Secrets are
+  // never affected: SUPABASE_SERVICE_ROLE_KEY, GOOGLE_CLIENT_SECRET, INTERNAL_API_KEY.)
+  "keep_vars": true,
+  "vars": {
+    "SUPABASE_URL": "https://elpljgrwrzaugsunoidf.supabase.co"
+  },
   "observability": {
     "enabled": true
   }
