@@ -28,3 +28,5 @@ GOOGLE_CLIENT_SECRET=
 # LINKEDIN_CLIENT_SECRET=
 # META_CLIENT_ID=
 # META_CLIENT_SECRET=
+# Shared secret the dashboard server sends (x-connect-key) to /auth/calcom/*. Routes refuse everything without it.
+CONNECT_API_KEY=

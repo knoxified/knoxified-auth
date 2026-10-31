@@ -436,15 +436,16 @@ app.post('/auth/:provider/token', async (c) => {
       return c.json({ accessToken, metadata });
     }
 
+    // Newest connection wins (callbacks insert a new row on every connect).
     const rows = await fetchJson(
-      `${env.SUPABASE_URL}/rest/v1/oauth_connections?user_id=eq.${userId}&provider=eq.${provider}`,
+      `${env.SUPABASE_URL}/rest/v1/oauth_connections?user_id=eq.${userId}&provider=eq.${provider}&order=created_at.desc&limit=1`,
       { headers: sbHeaders(env) }
     );
     const connection = rows?.[0];
     if (!connection) {
       return c.json({ error: 'no_connection_found' }, 404);
     }
-    return c.json({ accessToken: connection.access_token });
+    return c.json({ accessToken: connection.access_token, metadata: connection.metadata || null });
 
   } catch (err) {
     if (err.notFound) return c.json({ error: 'no_connection_found' }, 404);
@@ -454,6 +455,161 @@ app.post('/auth/:provider/token', async (c) => {
       error: 'token_fetch_failed',
       reason: err.data || err.message
     }, status);
+  }
+});
+
+/**
+ * API-KEY CONNECTIONS (Cal.com)
+ *
+ * Not OAuth: the customer pastes an API key from Cal.com (Settings > Developer >
+ * API keys). It is validated against Cal.com, then stored as a normal
+ * oauth_connections row (provider 'calcom', access_token = the key, no refresh
+ * token, no expiry) so /auth/calcom/token works exactly like every other provider.
+ *
+ * These routes are called by the dashboard SERVER (never the browser) and fail
+ * CLOSED: without a CONNECT_API_KEY secret on this Worker they refuse every
+ * request, because they write credentials for a user_id they are given.
+ */
+const CALCOM_API = 'https://api.cal.com/v2';
+const CALCOM_VERSION = '2024-08-13';
+
+function connectKeyOk(c) {
+  const key = c.env.CONNECT_API_KEY;
+  if (!key) return false;
+  return constantTimeEqual(c.req.header('x-connect-key') || '', key);
+}
+
+async function calcomGet(path, apiKey, version = CALCOM_VERSION) {
+  const res = await fetch(`${CALCOM_API}${path}`, {
+    headers: { Authorization: `Bearer ${apiKey}`, 'cal-api-version': version }
+  });
+  const text = await res.text();
+  let body = null;
+  try { body = text ? JSON.parse(text) : null; } catch { /* non-JSON */ }
+  return { ok: res.ok, status: res.status, body };
+}
+
+// Validates the key and lists the account's event types. Throws a tagged error
+// the routes turn into a clean response.
+async function inspectCalcomKey(apiKey) {
+  if (typeof apiKey !== 'string' || apiKey.trim().length < 10 || apiKey.length > 300) {
+    const e = new Error('invalid_api_key'); e.code = 'invalid_api_key'; throw e;
+  }
+  const key = apiKey.trim();
+
+  const me = await calcomGet('/me', key);
+  if (me.status === 401 || me.status === 403) {
+    const e = new Error('invalid_api_key'); e.code = 'invalid_api_key'; throw e;
+  }
+  if (!me.ok || !me.body?.data) {
+    const e = new Error('calcom_unavailable'); e.code = 'calcom_unavailable'; throw e;
+  }
+  const user = me.body.data;
+
+  // Event-type endpoints have used different version headers over time: try the
+  // documented one first, then the older one.
+  let list = await calcomGet('/event-types', key);
+  if (!list.ok) list = await calcomGet('/event-types', key, '2024-06-14');
+  if (!list.ok) {
+    const e = new Error('calcom_unavailable'); e.code = 'calcom_unavailable'; throw e;
+  }
+  const data = list.body?.data;
+  const raw = Array.isArray(data)
+    ? data
+    : (data?.eventTypeGroups || []).flatMap((g) => g.eventTypes || []);
+
+  const eventTypes = raw
+    .filter((t) => t && t.id)
+    .map((t) => ({
+      id: t.id,
+      slug: t.slug,
+      title: t.title,
+      lengthMinutes: t.lengthInMinutes ?? t.length ?? null,
+      hidden: !!t.hidden
+    }));
+
+  return { key, user, eventTypes };
+}
+
+function calcomErrorResponse(c, err) {
+  if (err.code === 'invalid_api_key') return c.json({ error: 'invalid_api_key' }, 400);
+  if (err.code === 'calcom_unavailable') return c.json({ error: 'calcom_unavailable' }, 502);
+  console.log('CALCOM ERROR:', err.data || err.message);
+  return c.json({ error: 'calcom_failed' }, 500);
+}
+
+// Step 1: check the key and return the event types to choose from (saves nothing).
+app.post('/auth/calcom/event-types', async (c) => {
+  if (!connectKeyOk(c)) return c.json({ error: 'unauthorized' }, 401);
+  try {
+    const { apiKey } = await c.req.json();
+    const { user, eventTypes } = await inspectCalcomKey(apiKey);
+    return c.json({
+      account: { username: user.username || null, email: user.email || null, timeZone: user.timeZone || null },
+      eventTypes
+    });
+  } catch (err) {
+    return calcomErrorResponse(c, err);
+  }
+});
+
+// Step 2: save the connection with the chosen event type.
+app.post('/auth/calcom/connect', async (c) => {
+  if (!connectKeyOk(c)) return c.json({ error: 'unauthorized' }, 401);
+  const env = c.env;
+  try {
+    const { userId, apiKey, eventTypeId, setAsCalendar } = await c.req.json();
+    if (!userId) return c.json({ error: 'missing_userId' }, 400);
+
+    const { key, user, eventTypes } = await inspectCalcomKey(apiKey);
+    const chosen = eventTypes.find((t) => String(t.id) === String(eventTypeId));
+    if (!chosen) return c.json({ error: 'invalid_event_type', eventTypes }, 400);
+
+    const inserted = await fetchJson(`${env.SUPABASE_URL}/rest/v1/oauth_connections`, {
+      method: 'POST',
+      headers: { ...sbHeaders(env), Prefer: 'return=representation' },
+      body: JSON.stringify({
+        user_id: userId,
+        provider: 'calcom',
+        provider_user_id: user.id != null ? String(user.id) : null,
+        provider_email: user.email || null,
+        access_token: key,
+        refresh_token: null,
+        expires_at: null,
+        status: 'active',
+        metadata: {
+          eventTypeId: chosen.id,
+          eventTypeSlug: chosen.slug || null,
+          eventTypeTitle: chosen.title || null,
+          lengthMinutes: chosen.lengthMinutes,
+          timeZone: user.timeZone || null,
+          username: user.username || null,
+          apiVersion: CALCOM_VERSION
+        }
+      })
+    });
+
+    // Keep one Cal.com connection per user: drop older rows only after the new one is saved.
+    const newId = inserted?.[0]?.id;
+    if (newId) {
+      await fetch(
+        `${env.SUPABASE_URL}/rest/v1/oauth_connections?user_id=eq.${userId}&provider=eq.calcom&id=neq.${newId}`,
+        { method: 'DELETE', headers: sbHeaders(env) }
+      );
+    }
+
+    // Optionally make Cal.com the calendar the voice agent uses.
+    if (setAsCalendar === true) {
+      await fetch(`${env.SUPABASE_URL}/rest/v1/agent_configs?user_id=eq.${userId}`, {
+        method: 'PATCH',
+        headers: sbHeaders(env),
+        body: JSON.stringify({ calendar_provider: 'calcom' })
+      });
+    }
+
+    return c.json({ ok: true, eventType: chosen, account: { username: user.username || null, email: user.email || null } });
+  } catch (err) {
+    return calcomErrorResponse(c, err);
   }
 });
 
