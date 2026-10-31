@@ -613,4 +613,24 @@ app.post('/auth/calcom/connect', async (c) => {
   }
 });
 
+// Disconnect Cal.com: remove the stored key and fall back to Google if it was the active calendar.
+app.post('/auth/calcom/disconnect', async (c) => {
+  if (!connectKeyOk(c)) return c.json({ error: 'unauthorized' }, 401);
+  const env = c.env;
+  try {
+    const { userId } = await c.req.json();
+    if (!userId) return c.json({ error: 'missing_userId' }, 400);
+    await fetch(`${env.SUPABASE_URL}/rest/v1/oauth_connections?user_id=eq.${userId}&provider=eq.calcom`, {
+      method: 'DELETE', headers: sbHeaders(env)
+    });
+    await fetch(`${env.SUPABASE_URL}/rest/v1/agent_configs?user_id=eq.${userId}&calendar_provider=eq.calcom`, {
+      method: 'PATCH', headers: sbHeaders(env), body: JSON.stringify({ calendar_provider: 'google' })
+    });
+    return c.json({ ok: true });
+  } catch (err) {
+    console.log('CALCOM DISCONNECT ERROR:', err.data || err.message);
+    return c.json({ error: 'calcom_failed' }, 500);
+  }
+});
+
 export default app;
