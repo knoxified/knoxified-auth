@@ -732,6 +732,45 @@ app.post('/auth/google/calendar/move-event', async (c) => {
   }
 });
 
+// Find a lead's bookings straight from the owner's Google Calendar (by the lead's
+// email), so the dashboard doesn't depend on any other table holding the booking.
+app.post('/auth/google/calendar/find-events', async (c) => {
+  if (!connectKeyOk(c)) return c.json({ error: 'unauthorized' }, 401);
+  try {
+    const { userId, email } = await c.req.json();
+    if (!userId || !UUID_RE.test(userId)) return c.json({ error: 'missing_userId' }, 400);
+    const needle = String(email || '').trim().toLowerCase();
+    if (!/^[^\s@<>,;]+@[^\s@<>,;]+\.[^\s@<>,;]+$/.test(needle)) return c.json({ error: 'bad_email' }, 400);
+
+    const { accessToken } = await getValidToken(c.env, userId, 'google');
+    const params = new URLSearchParams({
+      q: needle,
+      singleEvents: 'true',
+      orderBy: 'startTime',
+      timeMin: new Date(Date.now() - 30 * 86400000).toISOString(),
+      maxResults: '50'
+    });
+    const res = await fetch(`https://www.googleapis.com/calendar/v3/calendars/primary/events?${params}`, {
+      headers: { Authorization: `Bearer ${accessToken}` }
+    });
+    if (!res.ok) {
+      console.log('FIND EVENTS ERROR:', res.status, await res.text().catch(() => ''));
+      return c.json({ error: 'calendar_read_failed' }, googleErrorStatus(res));
+    }
+    const data = await res.json();
+    const has = (v) => String(v || '').toLowerCase().includes(needle);
+    const events = (data.items || [])
+      .filter((ev) => ev.status !== 'cancelled' && ev.start?.dateTime && ev.end?.dateTime)
+      .filter((ev) => (ev.attendees || []).some((a) => String(a.email || '').toLowerCase() === needle) || has(ev.description) || has(ev.summary))
+      .map((ev) => ({ id: ev.id, start: ev.start.dateTime, end: ev.end.dateTime, summary: ev.summary || null, timeZone: ev.start.timeZone || null }));
+    return c.json({ ok: true, events });
+  } catch (err) {
+    if (err.notFound) return c.json({ error: 'no_connection_found' }, 404);
+    console.log('FIND EVENTS ERROR:', err.data || err.message);
+    return c.json({ error: err.data?.error === 'invalid_grant' ? 'token_expired' : 'find_failed' }, err.data?.error === 'invalid_grant' ? 401 : 500);
+  }
+});
+
 function utf8ToBase64(str) {
   const bytes = new TextEncoder().encode(str);
   let bin = '';
