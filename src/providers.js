@@ -11,8 +11,7 @@ const providers = {
       "https://www.googleapis.com/auth/calendar.events",          // create / edit events
       "https://www.googleapis.com/auth/calendar.freebusy",        // check free/busy
       "https://www.googleapis.com/auth/calendar.calendars.readonly", // read calendar list
-      "https://www.googleapis.com/auth/gmail.send",               // send email
-      "https://www.googleapis.com/auth/drive.file"                // optional, for Drive files
+      "https://www.googleapis.com/auth/gmail.send"                // send email
     ],
     accessType: "offline",
     prompt: "consent",

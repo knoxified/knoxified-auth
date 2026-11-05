@@ -633,4 +633,46 @@ app.post('/auth/calcom/disconnect', async (c) => {
   }
 });
 
+// Disconnect any OAuth provider for a user: revoke the grant at Google (so the
+// next connect shows a fresh consent screen and the app disappears from the
+// user's Google account permissions), then delete the stored tokens.
+app.post('/auth/:provider/disconnect', async (c) => {
+  if (!connectKeyOk(c)) return c.json({ error: 'unauthorized' }, 401);
+  const env = c.env;
+  const provider = c.req.param('provider');
+  if (!providers[provider]) return c.json({ error: 'unknown_provider' }, 400);
+  try {
+    const { userId } = await c.req.json();
+    if (!userId || !/^[0-9a-f-]{36}$/i.test(userId)) return c.json({ error: 'missing_userId' }, 400);
+
+    let revoked = null;
+    if (provider === 'google') {
+      const rows = await fetchJson(
+        `${env.SUPABASE_URL}/rest/v1/oauth_connections?user_id=eq.${userId}&provider=eq.google&select=access_token,refresh_token`,
+        { headers: sbHeaders(env) }
+      );
+      for (const row of rows || []) {
+        const token = row.refresh_token || row.access_token;
+        if (!token) continue;
+        // Revoking the refresh token revokes the whole grant. A 400 means it was
+        // already revoked or expired, which is fine: we still clear our copy.
+        const res = await fetch('https://oauth2.googleapis.com/revoke', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({ token })
+        });
+        revoked = res.ok;
+      }
+    }
+
+    await fetch(`${env.SUPABASE_URL}/rest/v1/oauth_connections?user_id=eq.${userId}&provider=eq.${provider}`, {
+      method: 'DELETE', headers: sbHeaders(env)
+    });
+    return c.json({ ok: true, revoked });
+  } catch (err) {
+    console.log('OAUTH DISCONNECT ERROR:', err.data || err.message);
+    return c.json({ error: 'disconnect_failed' }, 500);
+  }
+});
+
 export default app;
