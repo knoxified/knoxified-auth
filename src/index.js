@@ -675,4 +675,111 @@ app.post('/auth/:provider/disconnect', async (c) => {
   }
 });
 
+// ---- Appointment rescheduling helpers (Google) --------------------------------
+// Both routes are CLOSED without CONNECT_API_KEY, like the Cal.com ones, and only
+// ever act on the Google connection of the userId the dashboard passes.
+
+const UUID_RE = /^[0-9a-f-]{36}$/i;
+
+function googleErrorStatus(res) {
+  // 401/403 from Google = token or scope problem, anything else = Google is unhappy
+  return res.status === 401 || res.status === 403 ? 403 : 502;
+}
+
+// Move a Google Calendar event to a new start time, keeping its length. No Google
+// notification emails go out (sendUpdates=none): the dashboard sends its own message.
+app.post('/auth/google/calendar/move-event', async (c) => {
+  if (!connectKeyOk(c)) return c.json({ error: 'unauthorized' }, 401);
+  try {
+    const { userId, eventId, newStart, timeZone } = await c.req.json();
+    if (!userId || !UUID_RE.test(userId)) return c.json({ error: 'missing_userId' }, 400);
+    if (!eventId || !/^[A-Za-z0-9_-]{5,1024}$/.test(String(eventId))) return c.json({ error: 'bad_event_id' }, 400);
+    const newStartMs = Date.parse(newStart);
+    if (!Number.isFinite(newStartMs)) return c.json({ error: 'bad_start' }, 400);
+
+    const { accessToken } = await getValidToken(c.env, userId, 'google');
+    const auth = { Authorization: `Bearer ${accessToken}` };
+    const url = `https://www.googleapis.com/calendar/v3/calendars/primary/events/${encodeURIComponent(eventId)}`;
+
+    const got = await fetch(url, { headers: auth });
+    if (got.status === 404 || got.status === 410) return c.json({ error: 'event_not_found' }, 404);
+    if (!got.ok) return c.json({ error: 'calendar_read_failed' }, googleErrorStatus(got));
+    const ev = await got.json();
+    if (ev.status === 'cancelled') return c.json({ error: 'event_not_found' }, 404);
+
+    const oldStart = Date.parse(ev.start?.dateTime);
+    const oldEnd = Date.parse(ev.end?.dateTime);
+    if (!Number.isFinite(oldStart) || !Number.isFinite(oldEnd)) return c.json({ error: 'event_not_timed' }, 422);
+
+    const tz = ev.start?.timeZone || timeZone || 'UTC';
+    const start = new Date(newStartMs).toISOString();
+    const end = new Date(newStartMs + (oldEnd - oldStart)).toISOString();
+
+    const patched = await fetch(`${url}?sendUpdates=none`, {
+      method: 'PATCH',
+      headers: { ...auth, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ start: { dateTime: start, timeZone: tz }, end: { dateTime: end, timeZone: tz } })
+    });
+    if (!patched.ok) {
+      console.log('MOVE EVENT ERROR:', patched.status, await patched.text().catch(() => ''));
+      return c.json({ error: 'calendar_update_failed' }, googleErrorStatus(patched));
+    }
+    return c.json({ ok: true, start, end });
+  } catch (err) {
+    if (err.notFound) return c.json({ error: 'no_connection_found' }, 404);
+    console.log('MOVE EVENT ERROR:', err.data || err.message);
+    return c.json({ error: err.data?.error === 'invalid_grant' ? 'token_expired' : 'move_failed' }, err.data?.error === 'invalid_grant' ? 401 : 500);
+  }
+});
+
+function utf8ToBase64(str) {
+  const bytes = new TextEncoder().encode(str);
+  let bin = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  return btoa(bin);
+}
+
+// Send ONE plain-text email from the customer's own Gmail to ONE recipient.
+app.post('/auth/google/mail/send', async (c) => {
+  if (!connectKeyOk(c)) return c.json({ error: 'unauthorized' }, 401);
+  try {
+    const { userId, to, subject, body } = await c.req.json();
+    if (!userId || !UUID_RE.test(userId)) return c.json({ error: 'missing_userId' }, 400);
+    const toClean = String(to || '').replace(/[\r\n]+/g, ' ').trim();
+    if (!/^[^\s@<>,;]+@[^\s@<>,;]+\.[^\s@<>,;]+$/.test(toClean)) return c.json({ error: 'bad_recipient' }, 400);
+    const subjectClean = String(subject || '').replace(/[\r\n]+/g, ' ').trim().slice(0, 200);
+    const text = String(body || '').slice(0, 5000);
+    if (!subjectClean || !text) return c.json({ error: 'empty_message' }, 400);
+
+    const { accessToken } = await getValidToken(c.env, userId, 'google');
+    const encSubject = /^[\x20-\x7E]*$/.test(subjectClean) ? subjectClean : `=?UTF-8?B?${utf8ToBase64(subjectClean)}?=`;
+    const mime = [
+      `To: ${toClean}`,
+      `Subject: ${encSubject}`,
+      'MIME-Version: 1.0',
+      'Content-Type: text/plain; charset="UTF-8"',
+      'Content-Transfer-Encoding: base64',
+      '',
+      utf8ToBase64(text).replace(/.{76}/g, '$&\r\n')
+    ].join('\r\n');
+    const raw = utf8ToBase64(mime).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+
+    const res = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ raw })
+    });
+    if (!res.ok) {
+      console.log('MAIL SEND ERROR:', res.status, await res.text().catch(() => ''));
+      return c.json({ error: 'send_failed' }, googleErrorStatus(res));
+    }
+    const sent = await res.json().catch(() => ({}));
+    return c.json({ ok: true, id: sent.id || null });
+  } catch (err) {
+    if (err.notFound) return c.json({ error: 'no_connection_found' }, 404);
+    console.log('MAIL SEND ERROR:', err.data || err.message);
+    return c.json({ error: err.data?.error === 'invalid_grant' ? 'token_expired' : 'send_failed' }, err.data?.error === 'invalid_grant' ? 401 : 500);
+  }
+});
+
 export default app;
