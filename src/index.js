@@ -762,7 +762,7 @@ app.post('/auth/google/calendar/find-events', async (c) => {
     const events = (data.items || [])
       .filter((ev) => ev.status !== 'cancelled' && ev.start?.dateTime && ev.end?.dateTime)
       .filter((ev) => (ev.attendees || []).some((a) => String(a.email || '').toLowerCase() === needle) || has(ev.description) || has(ev.summary))
-      .map((ev) => ({ id: ev.id, start: ev.start.dateTime, end: ev.end.dateTime, summary: ev.summary || null, timeZone: ev.start.timeZone || null }));
+      .map((ev) => ({ id: ev.id, start: ev.start.dateTime, end: ev.end.dateTime, summary: ev.summary || null, description: String(ev.description || '').slice(0, 500), timeZone: ev.start.timeZone || null }));
     return c.json({ ok: true, events });
   } catch (err) {
     if (err.notFound) return c.json({ error: 'no_connection_found' }, 404);
